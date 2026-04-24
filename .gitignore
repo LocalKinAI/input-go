@@ -1,0 +1,21 @@
+# The embedded dylib at internal/dylib/libinput_sync.dylib IS committed
+# (so `go get` works without downstream users building C code).
+# Root-level artifacts are not.
+/libinput_sync.dylib
+*.dylib.dSYM/
+
+# Go
+/vendor/
+*.test
+*.out
+coverage.txt
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Built CLI
+/input
