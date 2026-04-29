@@ -55,7 +55,7 @@ import (
 )
 
 // Version is the semantic-version tag of this package.
-const Version = "0.1.0"
+const Version = "0.2.0"
 
 // DylibPath is an optional override for the location of libinput_sync.dylib.
 // Default (empty): extract the embedded copy to the user cache directory.
@@ -72,10 +72,10 @@ var (
 	axTrustedFn   func(int32) int32
 	cursorPosFn   func(unsafe.Pointer, unsafe.Pointer) int32
 	screenSizeFn  func(unsafe.Pointer, unsafe.Pointer) int32
-	mouseEventFn  func(float64, float64, int32, int32, int32) int32
-	scrollFn      func(int32, int32) int32
-	keyFn         func(int32, int32, uint64) int32
-	typeUnicodeFn func(unsafe.Pointer, int32) int32
+	mouseEventFn  func(int32, float64, float64, int32, int32, int32) int32
+	scrollFn      func(int32, int32, int32) int32
+	keyFn         func(int32, int32, int32, uint64) int32
+	typeUnicodeFn func(int32, unsafe.Pointer, int32) int32
 	sleepMsFn     func(int32) int32
 )
 
@@ -191,6 +191,49 @@ func extractEmbedded() (string, error) {
 		return "", fmt.Errorf("input: rename: %w", err)
 	}
 	return target, nil
+}
+
+// ─── Posting options ─────────────────────────────────────────
+
+// PostOption tunes how an event is posted to the OS. Pass via the
+// variadic `opts` tail of any event-posting function.
+type PostOption func(*postConfig)
+
+type postConfig struct {
+	// pid: 0 = post system-wide via kCGHIDEventTap (the focused app
+	// receives the event and may come to front);
+	// > 0 = route directly to the given process via CGEventPostToPid
+	// (no focus steal).
+	pid int32
+}
+
+func resolveOpts(opts []PostOption) postConfig {
+	var c postConfig
+	for _, o := range opts {
+		if o != nil {
+			o(&c)
+		}
+	}
+	return c
+}
+
+// WithPID routes events directly to the given process via
+// CGEventPostToPid, avoiding focus steal — your foreground app stays
+// foreground while input-go drives a background app. pid=0 (the
+// default when the option is omitted) keeps the legacy system-wide
+// HID event tap behavior, which moves focus to the targeted control's
+// owning app.
+//
+// Verified working on Lark / VSCode / Chrome and other Electron + Web
+// View hosts. Some Apple sandboxed apps (newer Mail / Messages) may
+// ignore PID-targeted events — fall back to the default if you see
+// no effect.
+//
+//	input.Click(ctx, 400, 300, input.WithPID(int32(targetPID)))
+//	input.Type(ctx, "hello", input.WithPID(int32(targetPID)))
+//	input.Hotkey(ctx, input.ModCommand, input.KeyS, input.WithPID(int32(targetPID)))
+func WithPID(pid int32) PostOption {
+	return func(c *postConfig) { c.pid = pid }
 }
 
 // ─── Sentinel errors ─────────────────────────────────────────

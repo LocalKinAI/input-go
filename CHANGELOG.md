@@ -5,6 +5,124 @@ All notable changes to input-go are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-04-28
+
+Two improvements harvested from the cross-language survey done for
+KinClaw 2026-04-28: **per-process input routing** (axcli's headline
+"background-safe input" pattern) and a **`Hold` context-manager**
+inspired by pyautogui's `with hold(key)` form.
+
+Both land at the same time because they touch the same hot path —
+the dylib's event-posting functions. The dylib's exported symbols
+gained a leading `pid` parameter (breaking ABI for direct dylib
+consumers, but transparent to callers using the Go API), and every
+public Go function now accepts a variadic `opts ...PostOption` tail.
+Existing source-level callers keep compiling unchanged.
+
+### Added
+
+#### `WithPID(pid)` — background-safe input via `CGEventPostToPid`
+
+```go
+input.Click(ctx, 400, 300, input.WithPID(int32(targetPID)))
+input.Type(ctx, "hello", input.WithPID(int32(targetPID)))
+input.Hotkey(ctx, input.ModCommand, input.KeyS, input.WithPID(int32(targetPID)))
+```
+
+Routes the synthesized event directly to the target process — the
+focused app stays focused, your editor doesn't lose its insertion
+point, and multi-window workflows finally work without focus-thrash.
+
+Verified working on Lark / VSCode / Chrome and other Electron + Web
+View hosts (the same lineup axcli proved). Some Apple sandboxed apps
+(newer Mail / Messages) may ignore PID-targeted events and need the
+default system-wide route — fall back by omitting the option.
+
+`WithPID(0)` (or no option at all) preserves the legacy behavior:
+post to `kCGHIDEventTap` system-wide, the focused app receives the
+event and may come to front.
+
+#### `Hold(ctx, mods, keys, opts...)` — defer-friendly modifier holding
+
+```go
+defer input.Hold(ctx, input.ModShift, nil)()
+input.Press(ctx, input.KeyTab)   // Shift+Tab
+input.Press(ctx, input.KeyTab)   // still Shift+Tab
+```
+
+Returns a release closure designed for `defer`: the modifier keys
+get released on scope exit even if the surrounding code panics or
+returns early. Eliminates the "stuck modifier" class of bug where
+an error path between manual `KeyDown` / `KeyUp` calls leaves a
+shift / cmd / option held at the OS level — every subsequent input
+gets corrupted until the user notices and taps the modifier
+themselves.
+
+Multi-modifier scope works as you'd expect:
+```go
+defer input.Hold(ctx, input.ModCommand|input.ModShift, nil)()
+input.Press(ctx, input.KeyT)     // Cmd+Shift+T (reopen closed tab)
+```
+Modifiers release in reverse order (Shift before Command). The
+release closure is idempotent — calling it twice is safe but only
+the first call has effect.
+
+`keys` is a slice (not variadic) because the function already has a
+variadic `opts` tail. Pass `nil` for the modifier-only case.
+
+### Changed
+
+#### Variadic `opts ...PostOption` on every event-posting func
+
+The full list of touched signatures: `Move`, `MoveBy`, `MoveSmooth`,
+`Click`, `ClickAt`, `ClickAtButton`, `DoubleClick`, `RightClick`,
+`Drag`, `Scroll`, `ScrollSmooth`, `KeyDown`, `KeyUp`, `Press`,
+`Hotkey`, `Type`, `TypeSlow` — each gained `opts ...PostOption`
+at the end.
+
+`PostOption` is the only new exported type. The only `PostOption`
+constructor in v0.2.0 is `WithPID` — future options (e.g.
+`WithEventTap` to pick session vs HID tap, `WithDelay` for demos)
+can be added without further signature churn.
+
+#### Dylib ABI — pid as the first argument
+
+The four event-posting C symbols changed signature:
+
+```c
+// Before (v0.1.0)
+int32_t input_mouse_event(double x, double y, int32_t button, int32_t kind, int32_t clicks);
+int32_t input_scroll(int32_t dx, int32_t dy);
+int32_t input_key(int32_t keycode, int32_t down, uint64_t flags);
+int32_t input_type_unicode(const char *utf8, int32_t utf8_len);
+
+// After (v0.2.0)
+int32_t input_mouse_event(int32_t pid, double x, double y, ...);
+int32_t input_scroll(int32_t pid, int32_t dx, int32_t dy);
+int32_t input_key(int32_t pid, int32_t keycode, int32_t down, uint64_t flags);
+int32_t input_type_unicode(int32_t pid, const char *utf8, int32_t utf8_len);
+```
+
+The Go side is updated in lockstep, and v0.2.0 ships the matching
+embedded dylib. Direct dylib consumers (rare — purego is the
+intended path) need to update their function prototypes.
+
+`pid` semantics: `pid > 0` → `CGEventPostToPid`; `pid <= 0` →
+`CGEventPost(kCGHIDEventTap, ...)` (legacy).
+
+### Why this matters
+
+`WithPID` is the v0.x line's biggest behavioral upgrade since the
+initial release. Without it, every input synthesis steals focus from
+the user's foreground app — input-go was a "tool that takes over
+your Mac." With it, downstream agents are "tools that operate apps
+in the background while you keep working." That's not a refinement,
+that's a different relationship with the user.
+
+`Hold` is small but high signal: it removes a class of failures
+that are difficult to reproduce (stuck modifiers manifest only on
+certain error paths) and confusing when they happen.
+
 ## [0.1.0] - 2026-04-23
 
 Initial release. Pure-Go macOS mouse + keyboard synthesis built on

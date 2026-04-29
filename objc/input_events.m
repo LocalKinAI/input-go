@@ -39,25 +39,36 @@ int32_t input_cursor_position(double *x_out, double *y_out);
 // If kind==move or kind==drag, the event carries the new cursor position.
 // clicks: click count (1=single, 2=double, 3=triple). Only meaningful
 // for down/up events.
-int32_t input_mouse_event(double x, double y,
+//
+// pid: 0  = post system-wide via kCGHIDEventTap (default; the focused
+//          app gets the event and can come to front)
+//      >0 = route directly to the given process via CGEventPostToPid
+//          (no focus steal — verified working on Lark / VSCode / Chrome
+//          and other Electron + WebKit hosts; some Apple sandboxed apps
+//          may ignore PID-targeted events, in which case fall back to 0)
+int32_t input_mouse_event(int32_t pid,
+                          double x, double y,
                           int32_t button, int32_t kind,
                           int32_t clicks);
 
 // Post a scroll wheel event. dy is vertical (positive = scroll up),
 // dx is horizontal (positive = scroll right). Units are "lines" (pixel
-// scale) per CGEventCreateScrollWheelEvent.
-int32_t input_scroll(int32_t dx, int32_t dy);
+// scale) per CGEventCreateScrollWheelEvent. See input_mouse_event for
+// the pid argument's semantics.
+int32_t input_scroll(int32_t pid, int32_t dx, int32_t dy);
 
 // Post a keyboard event. keycode is a macOS virtual keycode
 // (kVK_ANSI_A etc., see <Carbon/HIToolbox/Events.h>).
 // down: 1=key down, 0=key up.
 // flags: CGEventFlags bitmask (kCGEventFlagMaskCommand | ...).
-int32_t input_key(int32_t keycode, int32_t down, uint64_t flags);
+// See input_mouse_event for the pid argument's semantics.
+int32_t input_key(int32_t pid, int32_t keycode, int32_t down, uint64_t flags);
 
 // Type a UTF-8 string by synthesizing keyboard-event-from-unicode
 // events. Does not go through a physical keycode — works for any
-// character regardless of the current keyboard layout.
-int32_t input_type_unicode(const char *utf8, int32_t utf8_len);
+// character regardless of the current keyboard layout. See
+// input_mouse_event for the pid argument's semantics.
+int32_t input_type_unicode(int32_t pid, const char *utf8, int32_t utf8_len);
 
 // Sleep for ms milliseconds on the caller thread. Convenience so Go
 // code can pace events without round-tripping through Go's time
@@ -105,6 +116,23 @@ int32_t input_screen_size(double *w_out, double *h_out) {
     return 0;
 }
 
+// post_event hands the synthesized event to the OS. pid > 0 routes
+// directly to the target process via CGEventPostToPid (no focus steal);
+// pid == 0 falls back to the system-wide HID event tap (legacy
+// behavior — focused app gets it, may come to front).
+//
+// CGEventPostToPid is documented in <CoreGraphics/CGEventSource.h>
+// (it ships in CGRemoteOperation.h on older SDKs, both are part of
+// CoreGraphics). axcli uses this trick for "background-safe input"
+// against Lark / VSCode / Chrome.
+static void post_event(CGEventRef ev, int32_t pid) {
+    if (pid > 0) {
+        CGEventPostToPid((pid_t)pid, ev);
+    } else {
+        CGEventPost(kCGHIDEventTap, ev);
+    }
+}
+
 // Map button enum → (CGMouseButton, down/up event type, drag event type).
 static void mouse_event_types(int32_t button,
                               CGMouseButton *cgBtn,
@@ -134,7 +162,8 @@ static void mouse_event_types(int32_t button,
     }
 }
 
-int32_t input_mouse_event(double x, double y,
+int32_t input_mouse_event(int32_t pid,
+                          double x, double y,
                           int32_t button, int32_t kind,
                           int32_t clicks) {
     CGMouseButton cgBtn;
@@ -156,35 +185,35 @@ int32_t input_mouse_event(double x, double y,
     if (clicks > 1 && (kind == 1 || kind == 2)) {
         CGEventSetIntegerValueField(ev, kCGMouseEventClickState, (int64_t)clicks);
     }
-    CGEventPost(kCGHIDEventTap, ev);
+    post_event(ev, pid);
     CFRelease(ev);
     return 0;
 }
 
-int32_t input_scroll(int32_t dx, int32_t dy) {
+int32_t input_scroll(int32_t pid, int32_t dx, int32_t dy) {
     // Pixel-unit scroll: axis2 = horizontal, axis1 = vertical.
     CGEventRef ev = CGEventCreateScrollWheelEvent(
         NULL, kCGScrollEventUnitPixel, 2,
         (int32_t)dy, (int32_t)dx);
     if (!ev) return -1;
-    CGEventPost(kCGHIDEventTap, ev);
+    post_event(ev, pid);
     CFRelease(ev);
     return 0;
 }
 
-int32_t input_key(int32_t keycode, int32_t down, uint64_t flags) {
+int32_t input_key(int32_t pid, int32_t keycode, int32_t down, uint64_t flags) {
     CGEventRef ev = CGEventCreateKeyboardEvent(
         NULL, (CGKeyCode)keycode, down != 0);
     if (!ev) return -1;
     if (flags != 0) {
         CGEventSetFlags(ev, (CGEventFlags)flags);
     }
-    CGEventPost(kCGHIDEventTap, ev);
+    post_event(ev, pid);
     CFRelease(ev);
     return 0;
 }
 
-int32_t input_type_unicode(const char *utf8, int32_t utf8_len) {
+int32_t input_type_unicode(int32_t pid, const char *utf8, int32_t utf8_len) {
     if (!utf8 || utf8_len <= 0) return 0;
     NSString *s = [[NSString alloc] initWithBytes:utf8
                                            length:(NSUInteger)utf8_len
@@ -215,8 +244,8 @@ int32_t input_type_unicode(const char *utf8, int32_t utf8_len) {
         }
         CGEventKeyboardSetUnicodeString(down, chlen, buf);
         CGEventKeyboardSetUnicodeString(up,   chlen, buf);
-        CGEventPost(kCGHIDEventTap, down);
-        CGEventPost(kCGHIDEventTap, up);
+        post_event(down, pid);
+        post_event(up, pid);
         CFRelease(down);
         CFRelease(up);
 
