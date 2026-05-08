@@ -5,6 +5,76 @@ All notable changes to input-go are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-05-07
+
+Adds **`PasteText` + clipboard helpers** — IME-safe text injection
+via the macOS pasteboard. Lifted out of `kinclaw/pkg/skill` (where
+it was a private helper) into the kit so every input-go consumer
+can paste CJK / multibyte text without re-implementing the
+pbcopy → ⌘V → restore dance.
+
+### Added — `input.PasteText(ctx, text, opts...) error`
+
+```go
+// Plain ASCII typing — Type works fine.
+input.Type(ctx, "hello world")
+
+// CJK / IME territory — Type drops chars at full keyboard rate.
+// PasteText routes through the system pasteboard instead.
+input.PasteText(ctx, "你好世界")
+
+// Same opts work — paste into a background app via PID.
+input.PasteText(ctx, longChineseText, input.WithPID(targetPID))
+```
+
+PasteText:
+1. Saves the user's current clipboard (text only — image / file /
+   RTF do not survive the round-trip, by macOS pasteboard design).
+2. Writes the new text via `pbcopy`.
+3. Fires ⌘V via the existing `Hotkey` path so `WithPID` and other
+   `PostOption`s route consistently with the rest of input-go.
+4. Sleeps 150ms to let the target app read the pasteboard.
+5. Restores the original clipboard (best-effort).
+
+The IME-safety property is the headline: `Type` synthesizes one key
+event per character at ~100 char/s, which Pinyin / Wubi / Kotoeri
+front-ends frequently can't keep up with — characters get dropped or
+the IME composition state desyncs. PasteText sidesteps the IME
+entirely by routing through the system pasteboard.
+
+### Added — `input.ReadClipboard` / `input.WriteClipboard`
+
+```go
+prev, _ := input.ReadClipboard(ctx)         // pbpaste wrapper
+input.WriteClipboard(ctx, "queued payload") // pbcopy wrapper
+```
+
+Building blocks for code that wants the pasteboard without firing ⌘V.
+Used by callers that batch multiple paste operations or need to
+inspect / round-trip the clipboard without going through the full
+PasteText flow.
+
+### Why this matters
+
+Bilingual / non-Latin agent users hit the IME-drop bug constantly —
+the agent asks the model "type this Chinese sentence" and the user
+sees half of it land. `PasteText` makes that case actually work,
+without forcing every consumer to maintain their own pbcopy/pbpaste
+scaffolding.
+
+The trade-off: PasteText is ~200ms slower than `Type` (clipboard
+write + ⌘V + 150ms settle + clipboard restore) and clobbers the
+non-text portion of the user's clipboard. For Latin-1 typing, keep
+using `Type`. For CJK / multibyte / IME-active typing, use
+`PasteText`.
+
+### Build
+
+- Pure Go — no ObjC, no dylib rebuild. `pbcopy` / `pbpaste` are
+  shelled out via `os/exec` (universal on macOS, no ABI risk).
+- 4 new test cases covering pbcopy/pbpaste round-trip, restore
+  semantics, and ⌘V keystroke wiring through `Hotkey`.
+
 ## [0.2.0] - 2026-04-28
 
 Two improvements harvested from the cross-language survey done for

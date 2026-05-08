@@ -24,6 +24,16 @@ input hotkey cmd c
 - **Keyboard**: press/release individual keys, type arbitrary UTF-8
   (including CJK + emoji — bypasses keyboard layout), hotkey combos
   with any modifier stack.
+- **IME-safe paste** (v0.3): `PasteText` routes CJK / multibyte text
+  through the macOS pasteboard + ⌘V instead of synthesizing one key
+  event per character — Pinyin / Wubi / Kotoeri front-ends keep up.
+  Original clipboard is restored after the paste settles.
+- **Per-process routing** (v0.2): `WithPID(pid)` posts events directly
+  to a target app via `CGEventPostToPid`, so the user's foreground
+  window keeps focus while the agent operates a different app.
+- **Defer-friendly modifier holding** (v0.2): `Hold(ctx, mods, keys)`
+  returns a release closure designed for `defer` — eliminates the
+  "stuck modifier" class of bug.
 - **Geometry**: current cursor position, main screen size.
 - **Permission**: probe / prompt for Accessibility trust.
 - **No cgo**: downstream projects stay pure Go. The ObjC companion
@@ -87,8 +97,13 @@ func main() {
     // Double-click there
     input.DoubleClick(ctx, 800, 400)
 
-    // Type a string into the focused field
-    input.Type(ctx, "Hello 你好 👋")
+    // Type a string into the focused field (Latin-1 — fast, key-by-key)
+    input.Type(ctx, "Hello world")
+
+    // CJK / multibyte / IME-active app — paste through clipboard so
+    // Pinyin / Wubi / Kotoeri don't drop characters at full keyboard
+    // rate. v0.3 addition; original clipboard is restored after.
+    input.PasteText(ctx, "你好世界 👋")
 
     // Cmd+Shift+T (reopen closed tab)
     input.Hotkey(ctx, input.ModCommand|input.ModShift, input.KeyT)
@@ -150,18 +165,26 @@ Go code  ─── purego.Dlopen ────► libinput_sync.dylib (embedded)
   `~/Library/Caches/input-go/<content-hash>/libinput_sync.dylib` and
   Dlopens from there.
 
-## Known limitations (v0.1)
+## Known limitations (current as of v0.3)
 
 - **macOS only.** Linux/X11 and Windows/WinAPI would need sibling
   backends; out of scope.
 - **No keyboard event capture** — input-go synthesizes events, it
-  doesn't listen for them. A separate `input-go/listen` package is
-  planned for v0.2.
+  doesn't listen for them. KinClaw uses
+  [`kinax-go`](https://github.com/LocalKinAI/kinax-go)'s `Observer`
+  (push-based AX events) for the agent-observes-human use case
+  instead, since AX gives semantic notifications (`AXFocusedUIElement
+  Changed`, `AXValueChanged`) without polling. A raw-event
+  `input-go/listen` is therefore deferred indefinitely — file an
+  issue if you need it.
 - **Unicode typing bypasses keyboard layout.** `input.Type("A")` emits
   a literal `A` character event, not `Shift+a`. Apps that watch raw
   keycodes (games, key-remappers) won't see a modifier press. Use
   `input.Hotkey(input.ModShift, input.KeyA)` if you need layout-aware
-  behavior.
+  behavior. For CJK / IME contexts, prefer `input.PasteText` (v0.3).
+- **`PasteText` clobbers non-text clipboard.** The pasteboard restore
+  step only handles plain text — image / file / RTF clipboards do
+  not survive a PasteText round-trip. Documented at the call site.
 - **CapsLock state is not tracked.** If the user has CapsLock engaged,
   typed letters will come out uppercase regardless of your intent.
 - **Multi-display coordinate systems** are passed through unchanged —
@@ -172,13 +195,19 @@ Go code  ─── purego.Dlopen ────► libinput_sync.dylib (embedded)
 
 ## Roadmap
 
-- **v0.2** — `input/listen` subpackage: `CGEventTap` wrapper for
-  *reading* mouse/keyboard events (the symmetric half of this package).
-  Required for building cursor-highlight overlays, recording macros,
-  and agent-observes-human loops.
-- **v0.3** — Raw IOKit HID path for games and apps that bypass
-  CGEventTap (e.g. anti-cheat-protected games — `input-go` won't work
-  there, but we'll document the failure clearly).
+- **v0.2** — `WithPID` background-safe input routing (per-process
+  `CGEventPostToPid`) + `Hold` defer-friendly modifier scope.
+  **Shipped 2026-04-28.**
+- **v0.3** — `PasteText` IME-safe text injection via pasteboard +
+  ⌘V + restore + `ReadClipboard` / `WriteClipboard` building blocks.
+  **Shipped 2026-05-07.**
+- **v0.4** (planned) — `WithDelay(d)` PostOption for screen demos /
+  rate-limited apps; `WithEventTap` to pick session vs HID tap;
+  `MouseDown` / `MouseUp` raw primitives for callers building their
+  own gesture engines.
+- **v0.5** (planned) — Raw IOKit HID path for games and apps that
+  bypass CGEventTap (e.g. anti-cheat-protected games — won't work
+  there even with HID, but we'll document the failure clearly).
 - **Cross-platform backends** — only if a user files an issue asking.
 
 ## Contributing
